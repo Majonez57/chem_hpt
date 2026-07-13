@@ -1,0 +1,16 @@
+# python
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# large data / artifacts (do not commit)
+data/
+outputs/
+wandb/
+
+# packaging cruft
+*.egg-info/
+
+# vendored dependency (installed hpt package, not our code)
+HPT/
