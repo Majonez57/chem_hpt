@@ -30,12 +30,10 @@ def episode_starts(episode_ends: np.ndarray) -> np.ndarray:
     """
     return np.concatenate([[0], episode_ends[:-1]])
 
-
 def build_sample_indices(
-    episode_ends: np.ndarray, obs_horizon: int, pred_horizon: int
-) -> Tuple[np.ndarray, np.ndarray]:
+    episode_ends: np.ndarray, obs_horizon: int, pred_horizon: int) -> Tuple[np.ndarray, np.ndarray]:
     """Return (indices, episode_ids): every valid sample start timestep `t` and
-    the episode each one belongs to.
+  ZED_CROP_RANGE_W[0]  the episode each one belongs to.
 
     A timestep t is valid when both the observation window
     [t-obs_h+1 .. t] and the prediction window [t .. t+pred_h-1] fit fully
