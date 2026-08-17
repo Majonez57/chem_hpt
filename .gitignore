@@ -10,6 +10,7 @@ outputs/
 wandb/
 chemdata/
 chemdata_raw/
+lerobot_data/
 
 # packaging cruft
 *.egg-info/
