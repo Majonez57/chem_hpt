@@ -32,15 +32,15 @@ import json
 import time
 
 
-SOURCE_CHEMDATA_FOLDER_PATH = "/home/majonez57/Documents/chem_hpt/chemdata_raw/aug7/opaque"
+SOURCE_CHEMDATA_FOLDER_PATH = "/home/majonez57/Documents/chem_hpt/chemdata_raw/aug7/transparent_pipette"
 TARGET_CHEMDATA_PATH = "/home/majonez57/Documents/chem_hpt/chemdata"
-DATASET_NAME = "opaque_15"
+DATASET_NAME = "transparent_pipette_15"
 HZ_PER_SOURCE = 15
 
 
 ZED_CROP_RANGE_W = (280,-93) # Cropping the Zed image (if not already 480)
 ZED_CROP_RANGE_H = (0, None)
-IMAGE_NET_CHUNK = 512
+RESNET_BATCH = 512
 # Imagenet norm params 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -63,12 +63,12 @@ def precompute_resnet(data: np.array, device: str = 'cuda') -> np.array:
     std = torch.tensor(IMAGENET_STD, device=device).view(1, 3, 1, 1)
     
 
-    resized = np.array([cv2.resize(image,(244,244),interpolation=cv2.INTER_AREA) for image in data])
+    resized = np.array([cv2.resize(image,(224,224),interpolation=cv2.INTER_AREA) for image in data])
     n = resized.shape[0]
 
     features = []
-    for start in range(0, n, IMAGE_NET_CHUNK):
-        end = min(start + IMAGE_NET_CHUNK, n)
+    for start in range(0, n, RESNET_BATCH):
+        end = min(start + RESNET_BATCH, n)
         batch = torch.from_numpy(np.asarray(resized[start:end])).float().to(device)
         batch /= 255.0                    # Makes pixels 0..1
         batch = batch.permute(0, 3, 1, 2) # channel first (b, 3, 244, 244)
@@ -169,8 +169,8 @@ with h5py.File(f"{TARGET_CHEMDATA_PATH}/{DATASET_NAME}.hdf5", "w") as dataset:
                         if data.shape[2] == 853: data = data[:, ZED_CROP_RANGE_H[0]:ZED_CROP_RANGE_H[1],ZED_CROP_RANGE_W[0]:ZED_CROP_RANGE_W[1],:]
 
                         zed_features = precompute_resnet(data)
-                        dts = episode_group.create_dataset("exo_rgb_feats", data=wrist_features)
-                        dts.attrs['mode'] = "robot,human"
+                        dts = episode_group.create_dataset("exo_rgb_feats", data=zed_features)
+                        dts.attrs['mode'] = "robot"
 
                     case "zed__zed_node__depth__depth_registered":
                         # DEPTH ZED
