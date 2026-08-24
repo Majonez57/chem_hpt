@@ -1,4 +1,5 @@
 # python
+.lerobot/
 .venv/
 __pycache__/
 *.pyc
@@ -10,10 +11,14 @@ outputs/
 wandb/
 chemdata/
 chemdata_raw/
-lerobot_data/
+chemdata_lerobot/
 
 # packaging cruft
 *.egg-info/
 
-# vendored dependency (installed hpt package, not our code)
+# vendored dependency (installed packages, not our code)
 HPT/
+lerobot/
+
+# AI generated utilities
+GEN_SCRIPTS/

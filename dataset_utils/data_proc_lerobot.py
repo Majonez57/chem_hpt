@@ -39,6 +39,12 @@ VAL_EPISODES = (17, 18, 19)  # ? last 3 of 20, sorted by filename
 ZED_CROP_RANGE_W = (280, -93)  # width crop for legacy 853px ZED frames
 ZED_CROP_RANGE_H = (0, None)
 
+# ! the raw recordings store RGB in BGR channel order (verified visually: red tape
+# ! reads as blue through a true-RGB viewer). The recorder's playback tooling was
+# ! cv2-based, which assumes BGR input, which is why the raws looked fine there.
+# ! Flip on ingest so the dataset is true RGB, matching RGB inference-time input.
+CAMERA_BGR_TO_RGB = {"exo": True, "wrist": True}
+
 JOINT_NAMES = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
 POSE_NAMES = ("x", "y", "z", "roll", "pitch", "yaw")
 
@@ -85,6 +91,10 @@ def crop_zed(data: np.ndarray) -> np.ndarray:
         data = data[:, ZED_CROP_RANGE_H[0]:ZED_CROP_RANGE_H[1], ZED_CROP_RANGE_W[0]:ZED_CROP_RANGE_W[1], :]
     return data
 
+def bgr_to_rgb(data: np.ndarray) -> np.ndarray:
+    """Flip last axis BGR->RGB, contiguous copy (pyav/PIL safe)."""
+    return np.ascontiguousarray(data[..., ::-1])
+
 def process_episode(file_path: str, episode_n: int, dataset: LeRobotDataset) -> int:
     """Align all sources of one raw episode and add its frames (unless dry-running).
     returns the final number of frames.
@@ -120,11 +130,15 @@ def process_episode(file_path: str, episode_n: int, dataset: LeRobotDataset) -> 
                     # rgb wrist cam, kept raw (no resnet here)
                     data = old_obs[source][:]
                     wrist_frames = data[keep_indices_dict[source]]
+                    if CAMERA_BGR_TO_RGB["wrist"]:
+                        wrist_frames = bgr_to_rgb(wrist_frames)
                 case "zed__zed_node__rgb__color__rect__image":
                     # rgb ZED cam, kept raw with the legacy crop applied
                     data = old_obs[source][:]
                     data = data[keep_indices_dict[source]]
                     exo_frames = crop_zed(data)
+                    if CAMERA_BGR_TO_RGB["exo"]:
+                        exo_frames = bgr_to_rgb(exo_frames)
                 case "zed__zed_node__depth__depth_registered":
                     pass  # depth skipped, same as data_proc.py
                 case _:
@@ -144,7 +158,7 @@ def process_episode(file_path: str, episode_n: int, dataset: LeRobotDataset) -> 
         return n
 
     for t in range(n):
-        # ! frames are passed through as recorded (assumed RGB, same convention as data_proc.py)
+        # ! camera channels were flipped to RGB during ingest (see CAMERA_BGR_TO_RGB)
         dataset.add_frame({
             "observation.state": arm_joints[t].astype(np.float32),
             "observation.pose": arm_pose[t].astype(np.float32),
@@ -185,7 +199,7 @@ def main() -> None:
     split_dataset(
         dataset,
         splits={"train": list(range(len(files) - len(VAL_EPISODES))), "val": list(VAL_EPISODES)},
-        output_dir=TARGET_CHEMDATA_PATH,
+        output_dir=f"{TARGET_CHEMDATA_PATH}/{DATASET_NAME}_split",
     )
     print("[INFO]: done.")
 

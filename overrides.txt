@@ -1,0 +1,5 @@
+# Replaces lerobot's version caps so the ROCm 7.2 stack can resolve.
+# (Overrides REPLACE requirements; constraints.txt only narrows them.)
+torch>=2.7
+torchvision>=0.22.0
+torchcodec>=0.3.0
