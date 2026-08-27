@@ -6,10 +6,14 @@ Usage:
 Keys during playback:
     [space] pause/resume    [.] step forward    [,] step back    [q]/[esc] quit
 
-The overlay shows frame index, stream time and the gap to the previous
-stamp, so dropped-frame bursts are directly visible while playing. When a
-stream ends, the final frame is held with a banner showing how much longer
-the arm kept recording (the 'frozen tail' artifact).
+Streams are synced by timestamp: they are aligned onto the same uniform
+15hz grid + LOCF mapping the conversion pipeline uses (the arm timestamps
+define the grid), so playback previews exactly the frames the converted
+dataset will contain. The overlay shows per-camera frame index and
+staleness (grid time minus frame stamp), so held/frozen frames are
+directly visible. When playback ends, the final frame is held with a
+banner listing each stream's last frame time versus the arm's end. Use
+--raw to step through a single stream's raw frames by index instead.
 
 If the installed opencv build has no gui support (headless wheel), playback
 automatically falls back to ffplay, or to writing an mp4 clip opened with
@@ -34,21 +38,32 @@ CAM_SOURCES = {
     "wrist": "wrist_cam__image_raw",
 }
 ARMS = "soarms__data"
-DEFAULT_FPS = 15.0
+GRID_HZ = 15.0  # * uniform grid rate, same as the conversion pipeline
+DEFAULT_FPS = 10.0
 QUIT_KEYS = (ord("q"), 27)
 ARROW_RIGHT = 83
 ARROW_LEFT = 81
 
 
 class EpisodePlayer:
-    """Displays one or two camera streams of a raw episode near real time."""
+    """Displays timestamp-synced camera streams of a raw episode near real time."""
 
-    def __init__(self, h5: h5py.File, cams: list[str], scale: int, show_overlay: bool) -> None:
+    def __init__(self, h5: h5py.File, cams: list[str], scale: int, show_overlay: bool,
+                 grid: bool = True) -> None:
         self.h5 = h5
         self.cams = cams
         self.scale = scale
         self.show_overlay = show_overlay
-        self.streams: dict[str, tuple[h5py.Dataset, np.ndarray, np.ndarray]] = {}
+        self.grid_ms: np.ndarray | None = None
+        self.streams: dict[str, tuple[h5py.Dataset, np.ndarray, np.ndarray, np.ndarray]] = {}
+        arm_stamps = h5[f"timestamps/{ARMS}"][:]
+        self.arm_start_s = float(arm_stamps.min())
+        self.arm_end_s = float(arm_stamps.max())
+        if grid:
+            # ! same uniform grid + LOCF alignment as the conversion pipeline
+            start_ms = round(self.arm_start_s * 1000)
+            end_ms = round(self.arm_end_s * 1000)
+            self.grid_ms = np.arange(start_ms, end_ms, int(1000 / GRID_HZ))
         for cam in cams:
             src = CAM_SOURCES[cam]
             if f"observations/{src}" not in h5:
@@ -57,19 +72,26 @@ class EpisodePlayer:
             ds = h5[f"observations/{src}"]
             stamps = h5[f"timestamps/{src}"][:]
             gaps_ms = np.r_[0.0, np.diff(stamps) * 1000.0]
-            self.streams[cam] = (ds, stamps, gaps_ms)
-        self.arm_end_s = float(h5[f"timestamps/{ARMS}"][:].max())
+            if self.grid_ms is not None:
+                keep = np.searchsorted(np.round(stamps * 1000), self.grid_ms, side="right") - 1
+                keep[keep < 0] = 0  # solves potential edge cases
+            else:
+                keep = np.arange(len(stamps))
+            self.streams[cam] = (ds, stamps, gaps_ms, keep)
 
     @property
     def n(self) -> int:
-        return min(ds.shape[0] for ds, _, _ in self.streams.values())
+        if self.grid_ms is not None:
+            return len(self.grid_ms)
+        return min(ds.shape[0] for ds, _, _, _ in self.streams.values())
 
     def render(self, i: int, banner: list[str] | None = None) -> np.ndarray:
-        """Compose the display image for stream frame index i."""
+        """Compose the display image for grid (or raw) frame index i."""
         tiles = []
         for cam in self.cams:
-            ds, stamps, gaps = self.streams[cam]
-            frame = cv2.cvtColor(ds[i], cv2.COLOR_RGB2BGR)
+            ds, stamps, gaps, keep = self.streams[cam]
+            idx = int(keep[i])
+            frame = cv2.cvtColor(ds[idx], cv2.COLOR_RGB2BGR)
             if self.scale != 1:
                 frame = cv2.resize(
                     frame,
@@ -77,11 +99,19 @@ class EpisodePlayer:
                     interpolation=cv2.INTER_NEAREST,
                 )
             if self.show_overlay:
-                lines = [
-                    cam,
-                    f"frame {i}/{self.n - 1}",
-                    f"t={stamps[i] - stamps[0]:.2f}s  dt={gaps[i]:+.0f}ms",
-                ]
+                if self.grid_ms is not None:
+                    stale_ms = self.grid_ms[i] - round(stamps[idx] * 1000)
+                    lines = [
+                        cam,
+                        f"grid {i}/{self.n - 1}  t={(self.grid_ms[i] - self.grid_ms[0]) / 1000:.2f}s",
+                        f"frame {idx}/{ds.shape[0] - 1}  stale={stale_ms:+.0f}ms",
+                    ]
+                else:
+                    lines = [
+                        cam,
+                        f"frame {idx}/{self.n - 1}",
+                        f"t={stamps[idx] - stamps[0]:.2f}s  dt={gaps[idx]:+.0f}ms",
+                    ]
                 frame = _overlay(frame, lines)
             tiles.append(frame)
         height = min(t.shape[0] for t in tiles)
@@ -106,11 +136,20 @@ class EpisodePlayer:
 
     def _end_banner(self, end: int) -> list[str]:
         """Lines shown on the held final frame (frozen tail info)."""
-        stamps = self.streams[self.cams[0]][1]
-        return [
-            f"END OF STREAM at t={stamps[end - 1] - stamps[0]:.2f}s "
-            f"(arm records until t={self.arm_end_s - stamps[0]:.2f}s)",
+        if self.grid_ms is None:
+            stamps = self.streams[self.cams[0]][1]
+            return [
+                f"END OF STREAM at t={stamps[end - 1] - stamps[0]:.2f}s "
+                f"(arm records until t={self.arm_end_s - stamps[0]:.2f}s)",
+            ]
+        lines = [
+            f"END OF GRID at t={(self.grid_ms[end - 1] - self.grid_ms[0]) / 1000:.2f}s "
+            f"(arm records until t={self.arm_end_s - self.arm_start_s:.2f}s)",
         ]
+        for cam in self.cams:
+            stamps = self.streams[cam][1]
+            lines.append(f"{cam}: last frame at t={stamps.max() - self.arm_start_s:.2f}s")
+        return lines
 
     def _run_cv2(self, start: int, end: int, fps: float) -> None:
         """Interactive window loop: pause/step with the keyboard."""
@@ -237,6 +276,8 @@ def main() -> None:
     parser.add_argument("--scale", default="auto",
                         help="'auto' picks 2x for small frames, or an integer factor")
     parser.add_argument("--no-overlay", action="store_true", help="hide the info overlay")
+    parser.add_argument("--raw", action="store_true",
+                        help="play raw stream frames by index (skip grid/timestamp sync)")
     parser.add_argument("--list", action="store_true", help="list the episode sources and exit")
     args = parser.parse_args()
 
@@ -256,8 +297,12 @@ def main() -> None:
         else:
             scale = int(args.scale)
 
-        player = EpisodePlayer(h5, cams, scale=scale, show_overlay=not args.no_overlay)
-        fps = auto_fps(player.streams[cams[0]][1]) if args.fps == "auto" else float(args.fps)
+        player = EpisodePlayer(h5, cams, scale=scale, show_overlay=not args.no_overlay,
+                               grid=not args.raw)
+        if args.fps == "auto":
+            fps = GRID_HZ if not args.raw else auto_fps(player.streams[cams[0]][1])
+        else:
+            fps = float(args.fps)
 
         n = player.n
         start = max(0, n + args.start) if args.start < 0 else min(args.start, n - 1)
@@ -265,8 +310,9 @@ def main() -> None:
         if end <= start:
             sys.exit(f"[ERROR]: empty range start={start} end={end} (n={n})")
 
+        mode = "grid-synced" if not args.raw else "raw index"
         print(f"[INFO]: playing {args.episode.name} cams={cams} frames [{start},{end}) "
-              f"at {fps:.1f}fps (scale x{scale})")
+              f"at {fps:.1f}fps (scale x{scale}, {mode})")
         player.run(start, end, fps)
 
 
