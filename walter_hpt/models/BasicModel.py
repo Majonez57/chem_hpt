@@ -8,19 +8,6 @@ from .trunk import StandardTrunk
 from .heads import M_Head_MLP
 
 
-def get_sinusoid_encoding_table(position_start: int, position_end: int, d_hid: int) -> torch.Tensor:
-    """Sinusoid position encoding table"""
-
-    d_vec = (1. / torch.pow(10000, 2 * (torch.arange(d_hid) / 2).floor_() / d_hid)).unsqueeze(0).float()
-
-    sinusoid_table = torch.arange(position_start, position_end).unsqueeze(1) * d_vec
-
-    sinusoid_table[:, 0::2] = torch.sin(sinusoid_table[:, 0::2])  # dim 2i
-    sinusoid_table[:, 1::2] = torch.cos(sinusoid_table[:, 1::2])  # dim 2i+1
-
-    return sinusoid_table.unsqueeze(0)
-
-
 @dataclass
 class StemSpec:
     """Hyperparameters of the stem for one input modality"""
@@ -30,14 +17,12 @@ class StemSpec:
     num_heads: int = 4   # Cross-attn heads inside the stem
     dropout: float = 0.0
 
-
 @dataclass
 class HeadSpec:
     """Hyperparameters of the head for one output modality"""
     out_dim: int  # Output dim per M token
-    hidden_dims: list[int] = field(default_factory=lambda: [256])
+    hidden_dims: list[int] = field(default_factory=lambda: [256]) # Needs to be a function to create a new mutable list
     dropout: float = 0.0
-
 
 @dataclass
 class DomainSpec:
@@ -77,12 +62,8 @@ class BasicHPTModel(nn.Module):
         self.modality_embs = nn.ParameterDict()  # Modality token added to each stem's latents
 
         for mod, spec in stem_specs.items():
-            self.stems[mod] = Stem(spec.feat_dim, embed_dim, spec.out_dim, spec.num_heads, t_horizon, spec.dropout)
+            self.stems[mod] = Stem(spec.feat_dim, embed_dim, spec.out_dim, spec.num_heads, t_horizon, spec.num_tokens, spec.dropout)
             self.modality_embs[mod] = nn.Parameter(torch.randn(embed_dim) * 0.02)
-
-            # Sinusoidal positions over the flattened [t T] input tokens of this modality
-            table = get_sinusoid_encoding_table(0, t_horizon * spec.num_tokens, spec.feat_dim)
-            self.register_buffer(f"pos_emb_{mod}", table.view(1, t_horizon, spec.num_tokens, spec.feat_dim))
 
         for mod, spec in head_specs.items():
             self.heads[mod] = M_Head_MLP(embed_dim, spec.hidden_dims, spec.out_dim, spec.dropout)
@@ -123,12 +104,10 @@ class BasicHPTModel(nn.Module):
 
         dspec = self.domain_specs[domain]
 
-        # * Add sinusoidal positions to the input tokens, run active stems, tag latents with a modality token
+        # * Run active stems (they handle horizon slicing + positional embeddings), tag latents with a modality token
         latents = []
         for mod in dspec.stems:
-            x = data[mod][:, -self.t_horizon:]      # [B t T feat_dim]
-            x = x + self.get_buffer(f"pos_emb_{mod}")
-            latent = self.stems[mod](x)             # [B out_dim embed_dim]
+            latent = self.stems[mod](data[mod])         # [B out_dim embed_dim]
             latents.append(latent + self.modality_embs[mod])
 
         trunk_in = torch.concat(latents, dim=1)     # [B N embed_dim]
