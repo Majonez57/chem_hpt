@@ -9,6 +9,9 @@ from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 from dataclasses import dataclass, field
 from typing import Optional
+from pathlib import Path
+from dataclasses import asdict
+
 
 from ChemdataLoader import ChemdataLoader, baseline_losses
 from models.BasicModel import StemSpec, HeadSpec, DomainSpec, BasicHPTModel
@@ -24,6 +27,7 @@ VAL_RATE   = 10 #Val every N epochs
 
 TRAIN_SPLIT = 0.85
 VAL_SPLIT   = 0.15
+CKPT_DIR = Path("outputs/basichpt") # ! repo-relative, created before saving
 
 
 ### TRUNK
@@ -77,8 +81,8 @@ def main():
     }
 
     head_specs = {
-        "pred_joint": HeadSpec(out_dim=6, hidden_dims=[256, 128]),
-        "pred_pose": HeadSpec(out_dim=6, hidden_dims=[256, 128])
+        "pred_joint": HeadSpec(out_dim=6, hidden_dims=[256, 128, 64]),
+        "pred_pose": HeadSpec(out_dim=6, hidden_dims=[256, 128, 64])
     }
 
     domain_specs = {
@@ -97,6 +101,8 @@ def main():
     loss_fn = nn.HuberLoss()
     optimiser = torch.optim.AdamW(model.parameters(), lr=3e-4)
 
+    CKPT_DIR.mkdir(parents=True, exist_ok=True) # * checkpoints land here
+
     # * Reference numbers for the val loss (hold-last while OBS_HORIZON == 1)
     for name, losses in baseline_losses(val_loader, loss_fn).items():
         print(f"VAL BASELINE {name:4s} | " + " ".join(f"{k} {v:.4f}" for k, v in losses.items()))
@@ -106,6 +112,7 @@ def main():
     print(f"This model has :{(params/1000000):.2f} M params")
 
     model.eval()
+    best_val = 999
     with torch.no_grad():
         val_loss = 0
         for obs, gt in val_loader:
@@ -162,9 +169,13 @@ def main():
             val_loss /= len(val_loader)
             for mod in mod_losses.keys(): mod_losses[mod] /= len(val_loader)
 
-        print(f"VAL_LOSS: {round(val_loss,3)}")
-        for mod in mod_losses.keys(): print(f"VAL_LOSS_{mod}: {round(mod_losses[mod],3)}")
+        print(f"VAL_LOSS: {round(val_loss,3)}", *[f"VAL_LOSS_{mod}: {round(mod_losses[mod],3)}" for mod in mod_losses.keys()])
+    
 
+        torch.save(model.state_dict(), CKPT_DIR / "last.pt")
+        if val_loss < best_val:
+            best_val = val_loss
+            torch.save(model.state_dict(), CKPT_DIR / "best.pt")
 
 if __name__ == "__main__":
     main()
