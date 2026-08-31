@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 from .stems import Stem
@@ -116,3 +116,39 @@ class BasicHPTModel(nn.Module):
         out_m, _ = self.trunk(trunk_in)             # [B M embed_dim]
 
         return {mod: self.heads[mod](out_m) for mod in dspec.heads}
+
+
+def save_checkpoint(path, model: BasicHPTModel, hparams: dict, stats: Optional[dict] = None) -> None:
+    """
+    Save a self-describing checkpoint: model config + weights (+ normalisation stats) in one file
+    """
+    torch.save({
+        "config": {
+            "stems":   {key: asdict(spec) for key, spec in model.stem_specs.items()},
+            "heads":   {key: asdict(spec) for key, spec in model.head_specs.items()},
+            "domains": {key: asdict(spec) for key, spec in model.domain_specs.items()},
+            "hparams": hparams,
+        },
+        "state_dict": model.state_dict(),
+        "stats": stats,
+    }, path)
+
+
+def load_checkpoint(path, device: str = "cuda") -> tuple[BasicHPTModel, Optional[dict]]:
+    """
+    Load a checkpoint written by save_checkpoint, returns (model on device, stats or None)
+    """
+    ckpt = torch.load(path, map_location=device, weights_only=False)  # ! trusted own file (pickled dicts)
+
+    if "config" not in ckpt:
+        raise ValueError(f"{path} is a legacy bare state_dict with no saved config")
+
+    cfg = ckpt["config"]
+    model = BasicHPTModel(
+        {key: StemSpec(**spec) for key, spec in cfg["stems"].items()},
+        {key: HeadSpec(**spec) for key, spec in cfg["heads"].items()},
+        {key: DomainSpec(**spec) for key, spec in cfg["domains"].items()},
+        **cfg["hparams"],
+    ).to(device)
+    model.load_state_dict(ckpt["state_dict"])
+    return model, ckpt.get("stats")
