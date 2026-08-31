@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import json
 from pathlib import Path
 
 import cv2
@@ -79,6 +80,9 @@ class EpisodePlayer:
                 keep = np.arange(len(stamps))
             self.streams[cam] = (ds, stamps, gaps_ms, keep)
 
+        grip_keep = np.searchsorted(np.round(arm_stamps * 1000), self.grid_ms, side="right") - 1
+        self.streams["grip"] = ([json.loads(x)["follower"]["gripper"] for x in h5[f"observations/{ARMS}"]], keep)
+
     @property
     def n(self) -> int:
         if self.grid_ms is not None:
@@ -88,6 +92,7 @@ class EpisodePlayer:
     def render(self, i: int, banner: list[str] | None = None) -> np.ndarray:
         """Compose the display image for grid (or raw) frame index i."""
         tiles = []
+        gripvals, grip_keep = self.streams["grip"]
         for cam in self.cams:
             ds, stamps, gaps, keep = self.streams[cam]
             idx = int(keep[i])
@@ -105,6 +110,7 @@ class EpisodePlayer:
                         cam,
                         f"grid {i}/{self.n - 1}  t={(self.grid_ms[i] - self.grid_ms[0]) / 1000:.2f}s",
                         f"frame {idx}/{ds.shape[0] - 1}  stale={stale_ms:+.0f}ms",
+                        f"grip  {round(gripvals[int(grip_keep[i])],2)}"
                     ]
                 else:
                     lines = [

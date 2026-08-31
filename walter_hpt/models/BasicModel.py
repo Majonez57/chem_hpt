@@ -39,7 +39,7 @@ class BasicHPTModel(nn.Module):
     Each batch comes from a single domain, which decides which stems/heads run.
     """
     def __init__(self, stem_specs: dict[str, StemSpec], head_specs: dict[str, HeadSpec],
-                 domain_specs: dict[str, DomainSpec], embed_dim: int, num_heads: int,
+                 domain_specs: dict[str, DomainSpec], embed_dim: int, num_trunk_heads: int,
                  num_blocks: int, t_horizon: int, m_token_dim: int, dropout: float = 0.0):
         super().__init__()
 
@@ -68,7 +68,7 @@ class BasicHPTModel(nn.Module):
         for mod, spec in head_specs.items():
             self.heads[mod] = M_Head_MLP(embed_dim, spec.hidden_dims, spec.out_dim, spec.dropout)
 
-        self.trunk = StandardTrunk(embed_dim, num_heads, num_blocks, m_token_dim, dropout)
+        self.trunk = StandardTrunk(embed_dim, num_trunk_heads, num_blocks, m_token_dim, dropout)
 
     def set_active_domain(self, domain: str) -> None:
         """

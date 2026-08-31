@@ -27,9 +27,9 @@ import numpy as np
 
 # * config (mirrors data_proc.py)
 
-SOURCE_CHEMDATA_FOLDER_PATH = "/home/majonez57/Documents/chem_hpt/chemdata_raw/aug7/opaque"
+SOURCE_CHEMDATA_FOLDER_PATH = "chemdata_raw/raw_aug26/opaque"
 TARGET_CHEMDATA_PATH = "/home/majonez57/Documents/chem_hpt/chemdata_lerobot"
-DATASET_NAME = "opaque_15"
+DATASET_NAME = "opaque"
 REPO_ID = f"local/{DATASET_NAME}"
 
 HZ_PER_SOURCE = 15
@@ -39,9 +39,7 @@ VAL_EPISODES = (17, 18, 19)  # ? last 3 of 20, sorted by filename
 ZED_CROP_RANGE_W = (280, -93)  # width crop for legacy 853px ZED frames
 ZED_CROP_RANGE_H = (0, None)
 
-# ! the raw recordings store RGB in BGR channel order (verified visually: red tape
-# ! reads as blue through a true-RGB viewer). The recorder's playback tooling was
-# ! cv2-based, which assumes BGR input, which is why the raws looked fine there.
+# ! the raw recordings store RGB in BGR channel order
 # ! Flip on ingest so the dataset is true RGB, matching RGB inference-time input.
 CAMERA_BGR_TO_RGB = {"exo": True, "wrist": True}
 
@@ -52,8 +50,8 @@ FEATURES = {
     "observation.state": {"dtype": "float32", "shape": (6,), "names": {"joints": list(JOINT_NAMES)}},
     "observation.pose": {"dtype": "float32", "shape": (6,), "names": {"pose": list(POSE_NAMES)}},
     "action": {"dtype": "float32", "shape": (6,), "names": {"joints": list(JOINT_NAMES)}},
-    "observation.images.exo": {"dtype": "video", "shape": (3, 480, 480), "names": ["channels", "height", "width"]},
-    "observation.images.wrist": {"dtype": "video", "shape": (3, 480, 640), "names": ["channels", "height", "width"]},
+    "observation.images.exo": {"dtype": "video", "shape": (3, 224, 224), "names": ["channels", "height", "width"]},
+    "observation.images.wrist": {"dtype": "video", "shape": (3, 224, 224), "names": ["channels", "height", "width"]},
 }
 
 
@@ -65,15 +63,18 @@ def locf_align(source_stamps: np.ndarray, grid_ms: np.ndarray) -> np.ndarray:
     keep_indices[keep_indices < 0] = 0  # solves potential edge cases
     return keep_indices
 
-def parse_soarms(datapoints: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def parse_soarms(datapoints: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     #Parse follower json strings into (joints + gripper, xyzrpy pose)
-    arm_pose = []
-    arm_joints = []
+    arm_pose_f   : list[list[int]] = []
+    arm_joints_f : list[list[int]] = []
+    arm_joints_l : list[list[int]] = []
+
     for datapoint in datapoints:
         arm_dict = json.loads(datapoint)  # json inside a h5, I know...
         follower_dict = arm_dict["follower"]
+        leader_dict = arm_dict["leader"]
         pose = follower_dict["pose"]
-        arm_pose.append([round(x, 5) for x in (
+        arm_pose_f.append([round(x, 5) for x in (
             pose["x"],
             pose["y"],
             pose["z"],
@@ -81,9 +82,13 @@ def parse_soarms(datapoints: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
             pose["pitch"],
             pose["yaw"],
         )])
-        joints = follower_dict["joints"] + [follower_dict["gripper"]]
-        arm_joints.append([round(x, 5) for x in joints])
-    return np.asarray(arm_joints), np.asarray(arm_pose)
+        joints_f = follower_dict["joints"] + [follower_dict["gripper"]]
+        arm_joints_f.append([round(x, 5) for x in joints_f])
+
+        joints_l = leader_dict["joints"] + [leader_dict["gripper"]]
+        arm_joints_l.append([round(x, 5) for x in joints_l])
+
+    return np.asarray(arm_joints_f), np.asarray(arm_joints_l), np.asarray(arm_pose_f)
 
 def crop_zed(data: np.ndarray) -> np.ndarray:
     #Crop legacy 853px-wide ZED frames (newer data crops at record time)
@@ -99,8 +104,8 @@ def process_episode(file_path: str, episode_n: int, dataset: LeRobotDataset) -> 
     """Align all sources of one raw episode and add its frames (unless dry-running).
     returns the final number of frames.
     """
-    arm_joints: np.ndarray | None = None
-    arm_pose: np.ndarray | None = None
+    arm_joints_f: np.ndarray | None = None
+    arm_pose_f: np.ndarray | None = None
     exo_frames: np.ndarray | None = None
     wrist_frames: np.ndarray | None = None
     source_stats: dict[str, tuple[int, int]] = {}
@@ -111,7 +116,9 @@ def process_episode(file_path: str, episode_n: int, dataset: LeRobotDataset) -> 
         v1: np.ndarray = old_stamps["soarms__data"][:]
 
         start_time = round(v1.min() * 1000)  # round to nearest ms
-        end_time = round(v1.max() * 1000)
+        end_time = round(v1.max() * 1000) - 1000 # !! We crop a second off the end due to the arm stream hold in chemdata.
+
+
         # ! int(1000/15) = 66ms grid step, identical to data_proc.py for frame parity
         grid_timestamps_ms = np.arange(start_time, end_time, int(1000 / HZ_PER_SOURCE))
 
@@ -125,7 +132,7 @@ def process_episode(file_path: str, episode_n: int, dataset: LeRobotDataset) -> 
                     # data from the two arms, we only keep the follower
                     data = old_obs[source][:]
                     data = data[keep_indices_dict[source]]  # ? fixes increasing order bug (h5py needs sorted idx)
-                    arm_joints, arm_pose = parse_soarms(data)
+                    arm_joints_f, arm_joints_l, arm_pose_f = parse_soarms(data)
                 case "wrist_cam__image_raw":
                     # rgb wrist cam, kept raw (no resnet here)
                     data = old_obs[source][:]
@@ -149,20 +156,20 @@ def process_episode(file_path: str, episode_n: int, dataset: LeRobotDataset) -> 
 
     n = len(grid_timestamps_ms)
     print(f"[INFO]: ep {episode_n}: {end_time - start_time}ms -> {n} frames @ {HZ_PER_SOURCE}hz | "
-          f"joints {arm_joints.shape}, exo {exo_frames.shape}, wrist {wrist_frames.shape}")
+          f"joints {arm_joints_f.shape}, exo {exo_frames.shape}, wrist {wrist_frames.shape}")
     for source, (kept, unique) in source_stats.items():
         print(f"        {source}: kept {kept} (unique {unique})")
-    print(f"        gripper range: [{arm_joints[:, -1].min():.3f}, {arm_joints[:, -1].max():.3f}]")
+    print(f"        gripper range: [{arm_joints_f[:, -1].min():.3f}, {arm_joints_f[:, -1].max():.3f}]")
 
     if dataset is None:
         return n
 
-    for t in range(n):
-        # ! camera channels were flipped to RGB during ingest (see CAMERA_BGR_TO_RGB)
+    for t in range(n-1):
+        # TODO: Compare this to using follower obs leader action
         dataset.add_frame({
-            "observation.state": arm_joints[t].astype(np.float32),
-            "observation.pose": arm_pose[t].astype(np.float32),
-            "action": arm_joints[t].astype(np.float32),  # teleop replay: action == executed state
+            "observation.state": arm_joints_f[t].astype(np.float32), # Follower Observation
+            "observation.pose": arm_pose_f[t].astype(np.float32),
+            "action": arm_joints_f[t+1].astype(np.float32),          # Follower's next Observation
             "observation.images.exo": exo_frames[t],
             "observation.images.wrist": wrist_frames[t],
             "task": TASK
@@ -193,14 +200,15 @@ def main() -> None:
     print(f"[INFO]: total frames: {total_frames}")
 
     # ! split_dataset copies + re-encodes the finalized source dataset into separate
-    # ! *_train / *_val datasets, so it must run AFTER finalize() and needs output_dir
+    # ! *_train / *_val datasets, so it must run AFTER finalize()
     dataset.finalize()
 
-    split_dataset(
-        dataset,
-        splits={"train": list(range(len(files) - len(VAL_EPISODES))), "val": list(VAL_EPISODES)},
-        output_dir=f"{TARGET_CHEMDATA_PATH}/{DATASET_NAME}_split",
-    )
+    # ? split here is not always necessary
+    # split_dataset(
+    #     dataset,
+    #     splits={"train": list(range(len(files) - len(VAL_EPISODES))), "val": list(VAL_EPISODES)},
+    #     output_dir=f"{TARGET_CHEMDATA_PATH}/{DATASET_NAME}_split",
+    # )
     print("[INFO]: done.")
 
 if __name__ == "__main__":

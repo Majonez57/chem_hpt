@@ -18,9 +18,9 @@ import json
 import time
 
 
-SOURCE_CHEMDATA_FOLDER_PATH = "/home/majonez57/Documents/chem_hpt/chemdata_raw/aug7/opaque"
+SOURCE_CHEMDATA_FOLDER_PATH = "/home/majonez57/Documents/chem_hpt/chemdata_raw/raw_aug26/opaque"
 TARGET_CHEMDATA_PATH = "/home/majonez57/Documents/chem_hpt/chemdata"
-DATASET_NAME = "opaque_15"
+DATASET_NAME = "opaque_v2"
 HZ_PER_SOURCE = 15
 
 
@@ -40,6 +40,26 @@ def resnet18_backbone(device: str = "cuda") -> nn.Module:
     backbone.eval().to(device)
     for p in backbone.parameters(): p.requires_grad = False
     return backbone
+
+def parse_soarms(datapoints: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    #Parse follower json strings into (joints + gripper, xyzrpy pose)
+    arm_pose = []
+    arm_joints = []
+    for datapoint in datapoints:
+        arm_dict = json.loads(datapoint)  # json inside a h5, I know...
+        follower_dict = arm_dict["follower"]
+        pose = follower_dict["pose"]
+        arm_pose.append([round(x, 5) for x in (
+            pose["x"],
+            pose["y"],
+            pose["z"],
+            pose["roll"],
+            pose["pitch"],
+            pose["yaw"],
+        )])
+        joints = follower_dict["joints"] + [follower_dict["gripper"]]
+        arm_joints.append([round(x, 5) for x in joints])
+    return np.asarray(arm_joints), np.asarray(arm_pose)
 
 @torch.no_grad()
 def precompute_resnet(data: np.array, device: str = 'cuda') -> np.array:
@@ -106,27 +126,9 @@ with h5py.File(f"{TARGET_CHEMDATA_PATH}/{DATASET_NAME}.hdf5", "w") as dataset:
                     # We only want the follower data!
                     n = old_obs[source].shape[0] 
 
-                    arm_pose   = []
-                    arm_joints = []
-
                     data = old_obs[source][:]
                     data = data[keep_indices_dict[source]] # ? fixes increasing order bug
-                    for datapoint in data:
-
-                        arm_dict = json.loads(datapoint) # json inside a h5 I know...
-                        
-                        follower_dict = arm_dict["follower"]
-                        pose = follower_dict["pose"]
-                        arm_pose.append([round(x, 5) for x in (
-                            pose["x"],
-                            pose["y"],
-                            pose["z"],
-                            pose["roll"],
-                            pose["pitch"],
-                            pose["yaw"]
-                        )])
-                        joints = follower_dict["joints"] + [follower_dict["gripper"]]
-                        arm_joints.append([round(x, 5) for x in joints])
+                    arm_joints, arm_pose = parse_soarms(data)
 
                     dts = episode_group.create_dataset("arm_pose", data=np.array(arm_pose))
                     dts.attrs['labels'] = "x,y,z,roll,pitch,yaw"

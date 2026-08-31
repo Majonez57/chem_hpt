@@ -1,7 +1,9 @@
 import h5py
 import numpy as np
 import torch
+import random
 from torch.utils.data import Dataset, DataLoader
+from typing import Optional
 
 # * Map output keys to the h5 datasets they come from (gt keys share sources with obs keys)
 OBS_SOURCES = {
@@ -26,28 +28,52 @@ class ChemdataLoader(Dataset):
     Use norm()/denorm() to apply/undo this outside of the loader (e.g. inference)
     """
 
-    def __init__(self, data_path: str, horizon_steps: int, action_steps: int, device:str):
+    def __init__(self, data_path: str, horizon_steps: int, action_steps: int, split:str, proportion: int = 1, stats: Optional[dict] = None, seed: int = 57, device: str = 'cuda'):
         self.path = data_path
         self.horizon = horizon_steps
         self.future_steps = action_steps
         self.device = device
 
         with h5py.File(data_path, 'r') as f:
-            # Find the number of episodes and their lengths
-            self.episodes = [
-                (ep, f[ep]["arm_joints"].shape[0]) for ep in f.keys()
-            ]
+            n_eps = len(f) # Total Number of episodes
 
-            # * Per-dimension mean/std of every source dataset # TODO cache to disk
-            source_stats = {
-                h5_key: self._dataset_stats(f, h5_key)
-                for h5_key in set(OBS_SOURCES.values()) | set(GT_SOURCES.values())
-            }
-            self.stats = {
-                key: (mean.to(self.device), std.to(self.device))
-                for key, (mean, std) in
-                {key: source_stats[h5_key] for key, h5_key in {**OBS_SOURCES, **GT_SOURCES}.items()}.items()
-            }
+            # Select the episodes for this split
+            random.seed(seed)
+            episode_idxs = random.sample(range(n_eps), k=round(n_eps*proportion))
+
+            # Find the number of episodes and their lengths for this split
+            # Use these to find all possible (episode_n, starts)
+
+            self.samples  = []
+            self.episodes = []
+            for idx, ep in enumerate(f.keys()):
+                if idx in episode_idxs: 
+                    episode_len = f[ep]["arm_joints"].shape[0]
+
+                    self.episodes.append((ep, episode_len))
+
+                    # All posible samples
+                    # Note that for validation and testing, the stride is the size of the window length to avoid correlating errors
+                    self.samples += [(ep, start) for start in range(horizon_steps, episode_len-action_steps, 1 if split == "train" else action_steps)]
+
+            print(len(self.samples))
+
+            # Val loader should use the stats of the training data!
+            if stats == None:
+                # * Per-dimension mean/std of every source dataset # TODO cache to disk
+                source_stats = {
+                    h5_key: self._dataset_stats(f, h5_key)
+                    for h5_key in set(OBS_SOURCES.values()) | set(GT_SOURCES.values())
+                }
+                self.stats = {
+                    key: (mean.to(self.device), std.to(self.device))
+                    for key, (mean, std) in
+                    {key: source_stats[h5_key] for key, h5_key in {**OBS_SOURCES, **GT_SOURCES}.items()}.items()
+                }
+            else: self.stats = stats
+
+        
+
 
         self._file: h5py.File | None = None
 
@@ -68,7 +94,7 @@ class ChemdataLoader(Dataset):
         std = np.sqrt(np.maximum(sq / n - mean**2, eps))
         return torch.from_numpy(mean).float(), torch.from_numpy(std).float()
 
-    def __len__(self): return 300 #jank
+    def __len__(self): return len(self.samples) #jank
 
     def norm(self, data: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """
@@ -103,16 +129,8 @@ class ChemdataLoader(Dataset):
         if self._file is None:
             self._file = h5py.File(self.path, 'r')
 
-        ep_name, N = self.episodes[torch.randint(len(self.episodes), (1,)).item()]
+        ep_name, obs_start = self.samples[index]
 
-        total = self.horizon + self.future_steps
-
-        # Random episode starting points
-        obs_start = torch.randint(
-            0,
-            N-total+1,
-            (1,)
-        ).item()
         obs_end = obs_start+self.horizon
 
         future_start = obs_end
@@ -131,6 +149,8 @@ if __name__ == "__main__":
         data_path="/home/majonez57/Documents/chem_hpt/chemdata/opaque_15.hdf5",
         horizon_steps=8,
         action_steps=32,
+        proportion=0.7,
+        split="train",
         device='cuda'
     )
 
